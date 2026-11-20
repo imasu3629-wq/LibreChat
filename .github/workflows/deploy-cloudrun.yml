@@ -1,0 +1,100 @@
+# =============================================================================
+# Deploy LibreChat to Google Cloud Run
+#
+# !!! THIS WORKFLOW IS A SKELETON AND IS NOT EXPECTED TO WORK YET !!!
+# まだ動きません（土台のみ）。MIGRATION.md の「3.1 事前準備」を済ませ、
+# 以下のプレースホルダを GitHub の Secrets / Variables に登録してから有効にしてください。
+#
+#   Secrets (Settings > Secrets and variables > Actions > Secrets):
+#     GCP_WIF_PROVIDER   : Workload Identity Provider のリソース名 (placeholder)
+#     GCP_DEPLOY_SA      : デプロイ用サービスアカウントのメール (placeholder)
+#   Variables (Settings > Secrets and variables > Actions > Variables):
+#     GCP_PROJECT_ID     : GCP プロジェクト ID (placeholder)
+#     GCP_REGION         : 例 asia-northeast1 (placeholder)
+#     GCP_RUNTIME_SA     : Cloud Run 実行用サービスアカウントのメール (placeholder)
+#     CLOUD_RUN_SERVICE  : 例 librechat (placeholder)
+#
+# アプリの秘密情報（MONGO_URI, CREDS_KEY, API キー等）は GitHub には置かず、
+# Secret Manager に登録して --set-secrets で Cloud Run に渡します。
+# サービスアカウントキー JSON は使わず Workload Identity Federation で認証します。
+#
+# 有効化するまでの間、vars.GCP_PROJECT_ID が未設定ならジョブはスキップされます。
+# =============================================================================
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloudrun
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation 用
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION }}
+  SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+  IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/librechat/librechat
+
+jobs:
+  deploy:
+    # プレースホルダ未設定（=まだ移行準備中）の間は実行しない
+    if: ${{ vars.GCP_PROJECT_ID != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        run: |
+          docker build -f Dockerfile.multi --target api-build \
+            -t "${IMAGE}:${GITHUB_SHA}" -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+          flags: >-
+            --port=3080
+            --service-account=${{ vars.GCP_RUNTIME_SA }}
+            --min-instances=1
+            --allow-unauthenticated
+          # 非秘密の設定のみ（値はプレースホルダ）
+          env_vars: |
+            HOST=0.0.0.0
+            SEARCH=true
+            MEILI_HOST=http://MEILI_INTERNAL_IP_PLACEHOLDER:7700
+            DOMAIN_CLIENT=https://CHAT_DOMAIN_PLACEHOLDER
+            DOMAIN_SERVER=https://CHAT_DOMAIN_PLACEHOLDER
+            SENTRY_ENVIRONMENT=production
+            SENTRY_RELEASE=${{ github.sha }}
+          # 秘密情報は Secret Manager の名前を参照するだけ（値は GitHub に置かない）
+          secrets: |
+            MONGO_URI=MONGO_URI:latest
+            MEILI_MASTER_KEY=MEILI_MASTER_KEY:latest
+            CREDS_KEY=CREDS_KEY:latest
+            CREDS_IV=CREDS_IV:latest
+            JWT_SECRET=JWT_SECRET:latest
+            JWT_REFRESH_SECRET=JWT_REFRESH_SECRET:latest
+            SENTRY_DSN=SENTRY_DSN:latest
